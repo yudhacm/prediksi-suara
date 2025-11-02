@@ -3,9 +3,10 @@ import numpy as np
 import librosa
 import soundfile as sf
 import joblib, json, os, tempfile, io
+import av
+import matplotlib.pyplot as plt
 from streamlit_mic_recorder import mic_recorder
 from sklearn.preprocessing import StandardScaler
-import av
 
 # === KONFIGURASI DASAR ===
 MODEL_PATH = "model/voice_cmd_best.pkl"
@@ -23,9 +24,8 @@ def load_assets():
     classes = json.load(open(CLASSES_PATH))
     return model, scaler, classes
 
-# === FUNGSI BANTU AUDIO ===
+# === EKSTRAKSI FITUR ===
 def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_length=400):
-    """Ekstraksi MFCC + delta + delta2 dengan pooling (mean + std)."""
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft,
                                 hop_length=hop_length, win_length=win_length)
     d1 = librosa.feature.delta(mfcc)
@@ -35,54 +35,51 @@ def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_
     std = np.std(feat, axis=1)
     return np.hstack([mean, std]).astype(np.float32)
 
+# === PREDIKSI AUDIO ===
 def predict_audio(file_path, model, scaler, classes):
-    """Prediksi suara dari file .wav (aman tanpa audioread)."""
     try:
         y, sr = sf.read(file_path, dtype='float32')
     except Exception as e:
         raise RuntimeError(f"Gagal membaca file audio: {e}")
 
-    # pastikan mono
     if y.ndim > 1:
         y = np.mean(y, axis=1)
 
-    # hilangkan bagian hening
     try:
         y, _ = librosa.effects.trim(y, top_db=30)
     except Exception:
         pass
 
-    # normalisasi panjang
     FIX_SAMPLES = int(TARGET_SR * FIX_SECONDS)
     if len(y) < FIX_SAMPLES:
         y = np.pad(y, (0, FIX_SAMPLES - len(y)))
     else:
         y = y[:FIX_SAMPLES]
 
-    # normalisasi amplitudo
     if np.max(np.abs(y)) > 0:
         y = y / np.max(np.abs(y))
 
-    # ekstraksi fitur
     feats = extract_features(y, sr).reshape(1, -1)
     feats_scaled = scaler.transform(feats)
 
-    # prediksi model
     probs = model.predict_proba(feats_scaled)[0]
     pred = model.predict(feats_scaled)[0]
     label = classes[int(pred)]
     conf = float(np.max(probs))
-    return label, conf, dict(zip(classes, probs.tolist()))
+    return label, conf, dict(zip(classes, probs.tolist())), y, sr
 
 # === ANTARMUKA STREAMLIT ===
 st.set_page_config(page_title="🎤 Voice Command Detector", layout="centered")
 st.title("🎙️ Deteksi Suara: 'Buka' / 'Tutup'")
 st.markdown("Tekan tombol di bawah untuk merekam suara langsung dari mikrofon Anda.")
 
-# === LOAD MODEL ===
 model, scaler, classes = load_assets()
 
-# === REKAMAN SUARA LANGSUNG ===
+# Reset otomatis setiap kali aplikasi dijalankan
+if "recorder" in st.session_state and st.session_state["recorder"] is not None:
+    st.session_state["recorder"] = None
+
+# === REKAMAN SUARA ===
 audio_data = mic_recorder(
     start_prompt="🎙️ Tekan untuk mulai merekam",
     stop_prompt="🛑 Tekan lagi untuk berhenti",
@@ -93,22 +90,19 @@ audio_data = mic_recorder(
 if audio_data:
     audio_bytes = audio_data["bytes"]
 
-    # coba baca langsung dengan soundfile
+    # Decode WebM -> PCM pakai PyAV
     try:
-    # Decode WebM/Opus menjadi PCM float32
         container = av.open(io.BytesIO(audio_bytes))
-        frames = [frame.to_ndarray().mean(axis=0) for frame in container.decode(audio=0)]  # jadi mono
-        data = np.concatenate(frames).astype(np.float32) / 32768.0
-        sr = 16000  # samakan dengan target SR
+        frames = [frame.to_ndarray().mean(axis=0) for frame in container.decode(audio=0)]
+        data = np.concatenate(frames).astype(np.float32)
+        sr = 16000
     except Exception as e:
         st.warning(f"⚠️ Gagal decode dengan av: {e}")
         data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
 
-    # ubah ke mono jika stereo
     if data.ndim > 1:
         data = np.mean(data, axis=1)
 
-    # simpan sebagai file .wav valid
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         sf.write(tmp, data, sr, format="WAV", subtype="PCM_16")
         tmp_path = tmp.name
@@ -116,13 +110,20 @@ if audio_data:
     st.audio(tmp_path, format="audio/wav")
     st.success("✅ Suara berhasil direkam dan dikonversi!")
 
-    # tombol prediksi
+    # === VISUALISASI WAVEFORM ===
+    fig, ax = plt.subplots(figsize=(6, 2))
+    librosa.display.waveshow(data, sr=sr, ax=ax, color="cyan")
+    ax.set_title("Waveform Rekaman")
+    ax.set_xlabel("Waktu (detik)")
+    ax.set_ylabel("Amplitudo")
+    st.pyplot(fig)
+
+    # === PREDIKSI ===
     if st.button("🔍 Prediksi Sekarang"):
-        label, conf, probs = predict_audio(tmp_path, model, scaler, classes)
+        label, conf, probs, y_proc, sr_proc = predict_audio(tmp_path, model, scaler, classes)
         st.success(f"**Prediksi:** {label.upper()}  \n**Kepercayaan:** {conf*100:.2f}%")
         st.json(probs)
 
-        # threshold kepercayaan
         if conf < 0.7:
             st.warning("⚠️ Suara tidak dikenali dengan cukup yakin. Coba ulangi rekaman.")
         else:
@@ -130,3 +131,6 @@ if audio_data:
                 st.markdown("🟢 Sistem mengenali suara **BUKA**.")
             elif label.lower() == "tutup":
                 st.markdown("🔴 Sistem mengenali suara **TUTUP**.")
+
+        # Reset agar rekaman tidak berlanjut
+        st.session_state["recorder"] = None
