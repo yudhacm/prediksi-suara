@@ -6,6 +6,8 @@ import joblib, json, os, tempfile
 from streamlit_mic_recorder import mic_recorder
 from sklearn.preprocessing import StandardScaler
 import soundfile as sf
+from pydub import AudioSegment
+import io
 
 
 # === Konfigurasi ===
@@ -101,21 +103,33 @@ audio_data = mic_recorder(
 )
 
 if audio_data:
-    # Simpan hasil rekaman ke file sementara
+    # Konversi bytes dari mic ke format WAV 16kHz agar soundfile bisa membaca
+    audio_bytes = audio_data["bytes"]
+
+    # Pastikan format input adalah WAV (mic_recorder bisa hasilkan webm)
+    try:
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
+    except Exception:
+        # fallback jika format bukan WAV
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="webm")
+
+    # Konversi ke mono 16kHz PCM
+    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+
+    # Simpan hasil konversi ke file sementara
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(audio_data["bytes"])
+        audio.export(tmp, format="wav")
         tmp_path = tmp.name
 
     st.audio(tmp_path, format="audio/wav")
-    st.success("✅ Suara berhasil direkam!")
+    st.success("✅ Suara berhasil direkam dan dikonversi!")
 
     if st.button("🔍 Prediksi Sekarang"):
         label, conf, probs = predict_audio(tmp_path, model, scaler, classes)
-
         st.success(f"**Prediksi:** {label.upper()}  \n**Kepercayaan:** {conf*100:.2f}%")
         st.json(probs)
 
-        # Tambahkan threshold kepercayaan
+        # Threshold
         if conf < 0.7:
             st.warning("⚠️ Suara tidak dikenali dengan cukup yakin. Coba ulangi rekaman.")
         else:
