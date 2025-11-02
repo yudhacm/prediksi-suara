@@ -1,6 +1,6 @@
 import streamlit as st
 import numpy as np
-import librosa
+import librosa, librosa.display
 import soundfile as sf
 import joblib, json, os, tempfile, io
 import av
@@ -24,6 +24,7 @@ def load_assets():
     classes = json.load(open(CLASSES_PATH))
     return model, scaler, classes
 
+
 # === EKSTRAKSI FITUR ===
 def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_length=400):
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft,
@@ -35,20 +36,13 @@ def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_
     std = np.std(feat, axis=1)
     return np.hstack([mean, std]).astype(np.float32)
 
+
 # === PREDIKSI AUDIO ===
 def predict_audio(file_path, model, scaler, classes):
-    try:
-        y, sr = sf.read(file_path, dtype='float32')
-    except Exception as e:
-        raise RuntimeError(f"Gagal membaca file audio: {e}")
-
+    y, sr = sf.read(file_path, dtype='float32')
     if y.ndim > 1:
         y = np.mean(y, axis=1)
-
-    try:
-        y, _ = librosa.effects.trim(y, top_db=30)
-    except Exception:
-        pass
+    y, _ = librosa.effects.trim(y, top_db=30)
 
     FIX_SAMPLES = int(TARGET_SR * FIX_SECONDS)
     if len(y) < FIX_SAMPLES:
@@ -68,6 +62,7 @@ def predict_audio(file_path, model, scaler, classes):
     conf = float(np.max(probs))
     return label, conf, dict(zip(classes, probs.tolist())), y, sr
 
+
 # === ANTARMUKA STREAMLIT ===
 st.set_page_config(page_title="🎤 Voice Command Detector", layout="centered")
 st.title("🎙️ Deteksi Suara: 'Buka' / 'Tutup'")
@@ -75,22 +70,23 @@ st.markdown("Tekan tombol di bawah untuk merekam suara langsung dari mikrofon An
 
 model, scaler, classes = load_assets()
 
-# Reset otomatis setiap kali aplikasi dijalankan
-if "recorder" in st.session_state and st.session_state["recorder"] is not None:
-    st.session_state["recorder"] = None
+# Bersihkan state recorder tiap load ulang halaman
+if "recorder" in st.session_state:
+    st.session_state.pop("recorder")
 
 # === REKAMAN SUARA ===
 audio_data = mic_recorder(
     start_prompt="🎙️ Tekan untuk mulai merekam",
-    stop_prompt="🛑 Tekan lagi untuk berhenti",
+    stop_prompt="🛑 Tekan untuk berhenti",
     key="recorder",
-    just_once=False
+    just_once=True,  # supaya tidak lanjut merekam
+    use_container_width=True
 )
 
 if audio_data:
     audio_bytes = audio_data["bytes"]
 
-    # Decode WebM -> PCM pakai PyAV
+    # Decode WebM → PCM dengan PyAV
     try:
         container = av.open(io.BytesIO(audio_bytes))
         frames = [frame.to_ndarray().mean(axis=0) for frame in container.decode(audio=0)]
@@ -103,6 +99,7 @@ if audio_data:
     if data.ndim > 1:
         data = np.mean(data, axis=1)
 
+    # Simpan ke file temporer
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
         sf.write(tmp, data, sr, format="WAV", subtype="PCM_16")
         tmp_path = tmp.name
@@ -132,5 +129,5 @@ if audio_data:
             elif label.lower() == "tutup":
                 st.markdown("🔴 Sistem mengenali suara **TUTUP**.")
 
-        # Reset agar rekaman tidak berlanjut
+        # Reset recorder agar tidak lanjut merekam
         st.session_state["recorder"] = None
