@@ -5,6 +5,7 @@ import soundfile as sf
 import joblib, json, os, tempfile, io
 from streamlit_mic_recorder import mic_recorder
 from sklearn.preprocessing import StandardScaler
+import av
 
 # === KONFIGURASI DASAR ===
 MODEL_PATH = "model/voice_cmd_best.pkl"
@@ -94,14 +95,14 @@ if audio_data:
 
     # coba baca langsung dengan soundfile
     try:
+    # Decode WebM/Opus menjadi PCM float32
+        container = av.open(io.BytesIO(audio_bytes))
+        frames = [frame.to_ndarray().mean(axis=0) for frame in container.decode(audio=0)]  # jadi mono
+        data = np.concatenate(frames).astype(np.float32) / 32768.0
+        sr = 16000  # samakan dengan target SR
+    except Exception as e:
+        st.warning(f"⚠️ Gagal decode dengan av: {e}")
         data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
-    except Exception:
-        # jika format tidak dikenal (misalnya WebM), fallback manual
-        import wave
-        import struct
-        audio_bytes_io = io.BytesIO(audio_bytes)
-        data = np.frombuffer(audio_bytes_io.read(), dtype=np.int16).astype(np.float32) / 32768.0
-        sr = TARGET_SR
 
     # ubah ke mono jika stereo
     if data.ndim > 1:
