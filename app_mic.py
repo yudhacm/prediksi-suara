@@ -5,6 +5,8 @@ import soundfile as sf
 import joblib, json, os, tempfile
 from streamlit_mic_recorder import mic_recorder
 from sklearn.preprocessing import StandardScaler
+import soundfile as sf
+
 
 # === Konfigurasi ===
 MODEL_PATH = "model/voice_cmd_best.pkl"
@@ -43,8 +45,17 @@ def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_
     return np.hstack([mean, std]).astype(np.float32)
 
 def predict_audio(file_path, model, scaler, classes):
-    # pastikan selalu mono, 16kHz, 1 detik
-    y, sr = librosa.load(file_path, sr=TARGET_SR, mono=True)
+    try:
+        # Gunakan soundfile dulu (lebih aman di cloud)
+        y, sr = sf.read(file_path, dtype='float32')
+    except Exception:
+        # fallback ke librosa jika gagal
+        import librosa
+        y, sr = librosa.load(file_path, sr=TARGET_SR, mono=True)
+
+    # pastikan mono
+    if y.ndim > 1:
+        y = np.mean(y, axis=1)
 
     # hilangkan bagian hening
     y, _ = librosa.effects.trim(y, top_db=30)
@@ -70,7 +81,6 @@ def predict_audio(file_path, model, scaler, classes):
     label = classes[int(pred)]
     conf = float(np.max(probs))
     return label, conf, dict(zip(classes, probs.tolist()))
-
 
 # === UI Streamlit ===
 st.set_page_config(page_title="🎤 Voice Command Detector (Mic)", layout="centered")
