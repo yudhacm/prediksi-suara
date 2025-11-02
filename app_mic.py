@@ -2,15 +2,11 @@ import streamlit as st
 import numpy as np
 import librosa
 import soundfile as sf
-import joblib, json, os, tempfile
+import joblib, json, os, tempfile, io
 from streamlit_mic_recorder import mic_recorder
 from sklearn.preprocessing import StandardScaler
-import soundfile as sf
-from pydub import AudioSegment
-import io
 
-
-# === Konfigurasi ===
+# === KONFIGURASI DASAR ===
 MODEL_PATH = "model/voice_cmd_best.pkl"
 SCALER_PATH = "model/scaler.pkl"
 CLASSES_PATH = "model/classes.json"
@@ -18,7 +14,7 @@ TARGET_SR = 16000
 FIX_SECONDS = 1.0
 FIX_SAMPLES = int(TARGET_SR * FIX_SECONDS)
 
-# === Fungsi bantu ===
+# === LOAD MODEL DAN SCALER ===
 @st.cache_resource
 def load_assets():
     model = joblib.load(MODEL_PATH)
@@ -26,17 +22,9 @@ def load_assets():
     classes = json.load(open(CLASSES_PATH))
     return model, scaler, classes
 
-def load_audio_fixed(path, target_sr=TARGET_SR, fix_len=FIX_SAMPLES):
-    y, sr = librosa.load(path, sr=target_sr, mono=True)
-    if np.max(np.abs(y)) > 0:
-        y = y / np.max(np.abs(y))
-    if len(y) < fix_len:
-        y = np.pad(y, (0, fix_len - len(y)))
-    else:
-        y = y[:fix_len]
-    return y, sr
-
+# === FUNGSI BANTU AUDIO ===
 def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_length=400):
+    """Ekstraksi MFCC + delta + delta2 dengan pooling (mean + std)."""
     mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=n_mfcc, n_fft=n_fft,
                                 hop_length=hop_length, win_length=win_length)
     d1 = librosa.feature.delta(mfcc)
@@ -47,54 +35,53 @@ def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_
     return np.hstack([mean, std]).astype(np.float32)
 
 def predict_audio(file_path, model, scaler, classes):
+    """Prediksi suara dari file .wav (aman tanpa audioread)."""
     try:
-        # Gunakan soundfile (lebih stabil di Streamlit Cloud)
         y, sr = sf.read(file_path, dtype='float32')
     except Exception as e:
-        raise RuntimeError(f"Gagal membaca file audio dengan soundfile: {e}")
+        raise RuntimeError(f"Gagal membaca file audio: {e}")
 
-    # Jika audio stereo, ubah ke mono
+    # pastikan mono
     if y.ndim > 1:
         y = np.mean(y, axis=1)
 
-    # Hilangkan keheningan (pakai librosa tapi hanya untuk trimming array, bukan loading file)
+    # hilangkan bagian hening
     try:
         y, _ = librosa.effects.trim(y, top_db=30)
     except Exception:
         pass
 
-    # Normalisasi panjang (1 detik)
-    FIX_SAMPLES = int(16000 * 1.0)
+    # normalisasi panjang
+    FIX_SAMPLES = int(TARGET_SR * FIX_SECONDS)
     if len(y) < FIX_SAMPLES:
         y = np.pad(y, (0, FIX_SAMPLES - len(y)))
     else:
         y = y[:FIX_SAMPLES]
 
-    # Normalisasi amplitudo
+    # normalisasi amplitudo
     if np.max(np.abs(y)) > 0:
         y = y / np.max(np.abs(y))
 
-    # Ekstraksi fitur
+    # ekstraksi fitur
     feats = extract_features(y, sr).reshape(1, -1)
     feats_scaled = scaler.transform(feats)
 
-    # Prediksi
+    # prediksi model
     probs = model.predict_proba(feats_scaled)[0]
     pred = model.predict(feats_scaled)[0]
-
     label = classes[int(pred)]
     conf = float(np.max(probs))
     return label, conf, dict(zip(classes, probs.tolist()))
 
-# === UI Streamlit ===
-st.set_page_config(page_title="🎤 Voice Command Detector (Mic)", layout="centered")
-st.title("🎙️ Deteksi Suara 'Buka' / 'Tutup'")
-st.markdown("Tekan tombol di bawah untuk merekam suara langsung dari mikrofon.")
+# === ANTARMUKA STREAMLIT ===
+st.set_page_config(page_title="🎤 Voice Command Detector", layout="centered")
+st.title("🎙️ Deteksi Suara: 'Buka' / 'Tutup'")
+st.markdown("Tekan tombol di bawah untuk merekam suara langsung dari mikrofon Anda.")
 
-# Load model
+# === LOAD MODEL ===
 model, scaler, classes = load_assets()
 
-# === Rekam suara ===
+# === REKAMAN SUARA LANGSUNG ===
 audio_data = mic_recorder(
     start_prompt="🎙️ Tekan untuk mulai merekam",
     stop_prompt="🛑 Tekan lagi untuk berhenti",
@@ -103,33 +90,38 @@ audio_data = mic_recorder(
 )
 
 if audio_data:
-    # Konversi bytes dari mic ke format WAV 16kHz agar soundfile bisa membaca
     audio_bytes = audio_data["bytes"]
 
-    # Pastikan format input adalah WAV (mic_recorder bisa hasilkan webm)
+    # coba baca langsung dengan soundfile
     try:
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="wav")
+        data, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
     except Exception:
-        # fallback jika format bukan WAV
-        audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="webm")
+        # jika format tidak dikenal (misalnya WebM), fallback manual
+        import wave
+        import struct
+        audio_bytes_io = io.BytesIO(audio_bytes)
+        data = np.frombuffer(audio_bytes_io.read(), dtype=np.int16).astype(np.float32) / 32768.0
+        sr = TARGET_SR
 
-    # Konversi ke mono 16kHz PCM
-    audio = audio.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+    # ubah ke mono jika stereo
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
 
-    # Simpan hasil konversi ke file sementara
+    # simpan sebagai file .wav valid
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        audio.export(tmp, format="wav")
+        sf.write(tmp, data, sr, format="WAV", subtype="PCM_16")
         tmp_path = tmp.name
 
     st.audio(tmp_path, format="audio/wav")
     st.success("✅ Suara berhasil direkam dan dikonversi!")
 
+    # tombol prediksi
     if st.button("🔍 Prediksi Sekarang"):
         label, conf, probs = predict_audio(tmp_path, model, scaler, classes)
         st.success(f"**Prediksi:** {label.upper()}  \n**Kepercayaan:** {conf*100:.2f}%")
         st.json(probs)
 
-        # Threshold
+        # threshold kepercayaan
         if conf < 0.7:
             st.warning("⚠️ Suara tidak dikenali dengan cukup yakin. Coba ulangi rekaman.")
         else:
@@ -137,4 +129,3 @@ if audio_data:
                 st.markdown("🟢 Sistem mengenali suara **BUKA**.")
             elif label.lower() == "tutup":
                 st.markdown("🔴 Sistem mengenali suara **TUTUP**.")
-
