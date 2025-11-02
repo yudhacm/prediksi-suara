@@ -46,35 +46,37 @@ def extract_features(y, sr=TARGET_SR, n_mfcc=20, n_fft=512, hop_length=160, win_
 
 def predict_audio(file_path, model, scaler, classes):
     try:
-        # Gunakan soundfile dulu (lebih aman di cloud)
+        # Gunakan soundfile (lebih stabil di Streamlit Cloud)
         y, sr = sf.read(file_path, dtype='float32')
-    except Exception:
-        # fallback ke librosa jika gagal
-        import librosa
-        y, sr = librosa.load(file_path, sr=TARGET_SR, mono=True)
+    except Exception as e:
+        raise RuntimeError(f"Gagal membaca file audio dengan soundfile: {e}")
 
-    # pastikan mono
+    # Jika audio stereo, ubah ke mono
     if y.ndim > 1:
         y = np.mean(y, axis=1)
 
-    # hilangkan bagian hening
-    y, _ = librosa.effects.trim(y, top_db=30)
+    # Hilangkan keheningan (pakai librosa tapi hanya untuk trimming array, bukan loading file)
+    try:
+        y, _ = librosa.effects.trim(y, top_db=30)
+    except Exception:
+        pass
 
-    # normalisasi panjang
+    # Normalisasi panjang (1 detik)
+    FIX_SAMPLES = int(16000 * 1.0)
     if len(y) < FIX_SAMPLES:
         y = np.pad(y, (0, FIX_SAMPLES - len(y)))
     else:
         y = y[:FIX_SAMPLES]
 
-    # normalisasi amplitudo
+    # Normalisasi amplitudo
     if np.max(np.abs(y)) > 0:
         y = y / np.max(np.abs(y))
 
-    # ekstraksi fitur
+    # Ekstraksi fitur
     feats = extract_features(y, sr).reshape(1, -1)
     feats_scaled = scaler.transform(feats)
 
-    # prediksi
+    # Prediksi
     probs = model.predict_proba(feats_scaled)[0]
     pred = model.predict(feats_scaled)[0]
 
