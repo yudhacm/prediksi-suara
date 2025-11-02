@@ -1,9 +1,8 @@
-streamlit==1.38.0
-streamlit-mic-recorder==0.0.3
-librosa==0.10.1
-soundfile==0.12.1
-numpy==1.26.4
-scikit-learn==1.5.2
-joblib==1.4.2
-pydub==0.25.1
-scipy==1.13.1
+streamlit
+streamlit-mic-recorder
+librosa
+soundfile
+numpy
+scikit-learn
+joblib
+pydub
